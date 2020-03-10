@@ -1,0 +1,103 @@
+"""Infoblocks Authenticator Plugin.
+
+
+"""
+import json,requests,zope.interface, requests, urllib3, json, smtplib, subprocess, time, base64, re, glob, logging
+from time import sleep
+from certbot import interfaces
+from certbot.plugins import common
+from acme import challenges
+from acme import messages
+from certbot.compat import os
+from certbot import achallenges
+
+    # Disable warnings
+urllib3.disable_warnings()
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+""" These Crediantials are only here to illustrate functionality, you should get them another way """
+
+dnsAddress =  "https://127.0.0.1"
+dnsUsername =  "username"
+dnsPassword =  "password"
+dnsDomain = "domain.com"
+dnsTestUrl =  dnsAddress + "/wapi/v1.2/record:host?name~=" + dnsDomain
+dnsAddTxtRecordUrl =  dnsAddress + "/wapi/v1.4.2/record:txt"
+dnsDeleteTxtRecordUrl = dnsAddress + "/wapi/v1.2/"
+dnsSearchTxtRecordUrl = dnsAddress + "/wapi/v1.2/record:txt?name="
+dnsView = "default"
+
+@zope.interface.implementer(interfaces.IAuthenticator)
+@zope.interface.provider(interfaces.IPluginFactory)
+class Authenticator(common.Plugin):
+    """ Infoblox Authenticator."""
+    description = "Infoblox Authenticator Plugin"
+
+
+    def more_info(self):
+        pass
+
+    def prepare(self):
+            # Check Infoblox login
+        headers = {'Content-type': "application/html"}
+        try:
+            self.r = requests.get(dnsTestUrl,timeout=10,verify=False, headers=headers, auth=(dnsUsername,dnsPassword))
+        except:
+            print("Infoblox: Connection Timeout!")
+
+        if self.r.status_code == 200:
+            print("Infoblox: Login OK")
+        else:
+            print("Infoblox: Login Failure!")
+            exit(1)
+
+    def get_chall_pref(self, unused_domain):
+        """Return list of challenge preferences."""
+        return [challenges.DNS01]
+
+    def perform(self, achalls):
+        responses = []
+        for achall in achalls:
+            domain = achall.domain
+            validation_domain_name = achall.validation_domain_name(domain)
+            validation = achall.validation(achall.account_key)
+            jsonPayload = {"name": validation_domain_name, "text": validation, "view": dnsView}
+            jsonPayloadHeaders = {'Content-type': "application/json"}
+            r = requests.post(dnsAddTxtRecordUrl,json=jsonPayload,verify=False,headers=jsonPayloadHeaders,auth=(dnsUsername,dnsPassword))
+            if 200 <= r.status_code <=299:
+                print("Infoblox: Record Added")
+                responses.append(achall.response(achall.account_key))
+                """ We sleep here to give Infoblox time to propagate """
+                print("Infoblox: Waiting for DNS to propagate")
+                sleep(5)
+            else:
+                print("Infoblox: Record NOT added!")
+                exit(1)
+            return responses
+
+    def cleanup(self,achalls):
+        print("Infoblox: Cleaning up challenges")
+        headers = {'Content-type': 'application/html'}
+        responses = []
+        for achall in achalls:
+            domain = achall.domain
+            validation_domain_name = achall.validation_domain_name(domain)
+            validation = achall.validation(achall.account_key)
+            reqUrl = dnsDeleteTxtRecordUrl+ "record:txt?name="+ validation_domain_name
+            headers = {'Content-type': "application/json"}
+            r = requests.get(reqUrl, verify=False, headers=headers, auth=(dnsUsername, dnsPassword))
+            respJson = json.loads(r.content.decode("utf-8"))
+            for jsonValue in respJson:
+                if jsonValue["_ref"]:
+                    refId = jsonValue["_ref"]
+            delUrl = dnsDeleteTxtRecordUrl + refId
+            r = requests.delete(delUrl, verify=False, headers=headers, auth=(dnsUsername, dnsPassword))
+
+            if 200 <= r.status_code <=299:
+                 print("Infoblox: %s Deleted " % validation_domain_name)
+                 responses.append(achall.response(achall.account_key))
+            else:
+                print("Infoblox: %s NOT Deleted!" % validation_domain_name)
+                exit(1)
+            return responses
