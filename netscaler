@@ -1,0 +1,204 @@
+"""Citrix Netscaler Nitro Authenticator Plugin
+   Based heavily on: https://github.com/ryancbutler/ns-letsencrypt/blob/master/ns-copytons.py
+   Installs all files to /nsconfig/ssl/letsencrypt/
+   Will create or update the SSL CA Cert
+
+"""
+
+import json,requests,zope.interface, requests, urllib3, json, smtplib, subprocess, time, base64, re, glob, logging
+from time import sleep
+from certbot import interfaces
+from certbot.plugins import common
+from acme import challenges
+from acme import messages
+from certbot.compat import os
+from certbot import achallenges
+
+citrixAddress = "127.0.0.1"
+citrixUsername = "username"
+citrixPassword = "password"
+nitroCookie = ""
+    # Disable warnings
+urllib3.disable_warnings()
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+@zope.interface.implementer(interfaces.IInstaller)
+@zope.interface.provider(interfaces.IPluginFactory)
+class Installer(common.Installer):
+    """Citrix Netscaler Nitro Installer"""
+    description = "Citrix Netscaler Nitro Installer"
+    def logOut(self,connectiontype,nitroNSIP,authToken):
+        url = '%s://%s/nitro/v1/config/logout' % (connectiontype, nitroNSIP)
+        headers = {'Content-type': 'application/vnd.com.citrix.netscaler.logout+json','Cookie': authToken}
+        json_string = {
+       "logout":{}
+        }
+        payload = json.dumps(json_string)
+        response = requests.post(url, data=payload, headers=headers, verify=False)
+        print("Citrix: Logging out %s" % response.reason)
+
+    def SaveNSConfig(self,connectiontype,nitroNSIP,authToken):
+        url = '%s://%s/nitro/v1/config/nsconfig?action=save' % (connectiontype, nitroNSIP)
+        headers = {'Content-type': 'application/json','Cookie': authToken}
+        json_string = {
+            "nsconfig":{}
+        }
+        payload = json.dumps(json_string)
+        response = requests.post(url, data=payload, headers=headers, verify=False)
+        print("Citrix: Save: %s" % response.reason)
+
+    def createSSL(self,connectiontype,nitroNSIP,authToken, nscert, nspairname, nskey):
+        url = '%s://%s/nitro/v1/config/sslcertkey' % (connectiontype, nitroNSIP)
+        headers = {'Content-type': 'application/json','Cookie': authToken}
+        json_string = {
+        "sslcertkey": {
+        "certkey": nspairname,
+        "cert": nscert,
+        "key": nskey,}
+        }
+        payload = json.dumps(json_string)
+        response = requests.post(url, data=payload, headers=headers, verify=False)
+        if response.reason == "Conflict":
+            print("Citrix: Create SSL: Updating Existing")
+            self.updateSSL(connectiontype,nitroNSIP,authToken, nscert, nspairname, nskey)
+        else:
+            print("Citrix: Create SSL: %s" % response.reason)
+
+
+    def updateSSL(self,connectiontype,nitroNSIP,authToken, nscert, nspairname, nskey):
+        url = '%s://%s/nitro/v1/config/sslcertkey?action=update' % (connectiontype, nitroNSIP)
+        headers = {'Content-type': 'application/json','Cookie': authToken}
+        json_string = {
+        "sslcertkey": {
+        "certkey": nspairname,
+        "cert": nscert ,
+        "nodomaincheck": True,}
+        }
+        payload = json.dumps(json_string)
+        response = requests.post(url, data=payload, headers=headers, verify=False)
+        print(response.content)
+        print("Citrix: Update: %s" % response.reason)
+
+    def removeFile(self,connectiontype,nitroNSIP,authToken,nscert,nscertpath):
+        url = '%s://%s/nitro/v1/config/systemfile/%s?args=filelocation:%%2Fnsconfig%%2Fssl%%2Fletsencrypt' % (connectiontype, nitroNSIP, nscert)
+        headers = {'Content-type': 'application/vnd.com.citrix.netscaler.systemfile+json','Cookie': authToken}
+        response = requests.delete(url, headers=headers, verify=False)
+        print("Citrix: Deleting old file: %s" % response.reason)
+        return response
+
+    def _sendFile(self,connectiontype,nitroNSIP,authToken,nscert,localcert,nscertpath):
+        url = '%s://%s/nitro/v1/config/systemfile' % (connectiontype, nitroNSIP)
+        headers = {'Content-type': 'application/vnd.com.citrix.netscaler.systemfile+json','Cookie':authToken}
+        f = open(localcert, 'rb')
+        filecontent = base64.b64encode(f.read())
+        json_string = {
+        "systemfile": {
+        "filename": nscert,
+        "filelocation": nscertpath,
+        "filecontent":filecontent.decode('utf-8'),
+        "fileencoding": "BASE64",}
+        }
+        payload = json.dumps(json_string)
+        r = requests.post(url, data=payload, headers=headers, verify=False)
+        if 200 <= r.status_code <=299:
+            print("Citrix: File: %s" % r.reason )
+        """ Delete old file if it exists and upload new"""
+        if r.status_code == 409:
+            response = self.removeFile('http',citrixAddress,authToken,nscert,nscertpath)
+            print("Citrix: Uploading new file: %s" % response.reason)
+            self._sendFile(connectiontype,nitroNSIP,authToken,nscert,localcert,nscertpath)
+
+    def prepare(self):
+        r = self.getAuthCookie("http", citrixAddress,citrixUsername,citrixPassword)
+        if r != "":
+            print("Citrix: Login OK")
+        else:
+            print("Citrix Login FAILURE!")
+            exit(1)
+
+    def getAuthCookie(self,connectiontype,nitroNSIP,nitroUser,nitroPass):
+        url = '%s://%s/nitro/v1/config/login' % (connectiontype, nitroNSIP)
+        headers = {'Content-type': 'application/vnd.com.citrix.netscaler.login+json'}
+        json_string = {
+            "login":{
+            "username":nitroUser,
+            "password":nitroPass,
+             }
+        }
+        payload = json.dumps(json_string)
+        try:
+            response = requests.post(url, data=payload, headers=headers, verify=False, timeout=1.0)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            print(e)
+            sys.exit(1)
+        except requests.exceptions.HTTPError as err:
+            print (err)
+            sys.exit(1)
+        cookie = response.cookies['NITRO_AUTH_TOKEN']
+        nitroCookie = 'NITRO_AUTH_TOKEN=%s' % cookie
+        return nitroCookie
+
+    def more_info(self):  # pylint: disable=missing-docstring,no-self-use
+        return ""
+
+    def get_all_names(self):  # pylint: disable=missing-docstring,no-self-use
+        pass  # pragma: no cover
+
+    def deploy_cert(self, domain, cert_path, key_path, chain_path, fullchain_path):
+        nitroCookie = self.getAuthCookie("http", citrixAddress,citrixUsername,citrixPassword)
+        cert = self._sendFile("http",citrixAddress,nitroCookie,domain + ".cert",cert_path,'/nsconfig/ssl/letsencrypt/')
+        """ Citrix doesnt like the format of the privkey so we will convert it and upload a copy """
+        command = "openssl rsa -in %s -out /tmp/%s.key" % (key_path, domain)
+        p = subprocess.Popen(command, stdin=subprocess.PIPE, shell=True)
+        p.communicate()
+        key = self._sendFile("http",citrixAddress,nitroCookie,domain + ".key","/tmp/" + domain + ".key" ,'/nsconfig/ssl/letsencrypt/')
+        #chain = self._sendFile("http",citrixAddress,nitroCookie,domain+ ".chain",chain_path,'/nsconfig/ssl/letsencrypt/')
+        #fullchain = self._sendFile("http",citrixAddress,nitroCookie,domain + ".fullchain",fullchain_path,'/nsconfig/ssl/letsencrypt/')
+        self.createSSL("http",citrixAddress,nitroCookie, "/nsconfig/ssl/letsencrypt/" + domain + ".cert", domain,"/nsconfig/ssl/letsencrypt/" + domain + ".key")
+        self.SaveNSConfig('http',citrixAddress,nitroCookie)
+        self.logOut('http',citrixAddress,nitroCookie)
+        return (0)
+
+    def save(self,title=None, temporary=False):
+        pass
+
+    def config_test():
+        pass
+
+    def restart():
+        pass
+
+    def enhance(self, domain, enhancement, options=None):  # pylint: disable=missing-docstring,no-self-use
+        pass  # pragma: no cover
+
+    def supported_enhancements(self):  # pylint: disable=missing-docstring,no-self-use
+        return []  # pragma: no cover
+
+    def get_all_certs_keys(self):  # pylint: disable=missing-docstring,no-self-use
+        pass  # pragma: no cover
+
+    def rollback_checkpoints(self, rollback=1):  # pylint: disable=missing-docstring,no-self-use
+        pass  # pragma: no cover
+
+    def recovery_routine(self):  # pylint: disable=missing-docstring,no-self-use
+        pass  # pragma: no cover
+
+    def view_config_changes(self):  # pylint: disable=missing-docstring,no-self-use
+        pass  # pragma: no cover
+
+    def config_test(self):  # pylint: disable=missing-docstring,no-self-use
+        pass  # pragma: no cover
+
+    def restart(self):  # pylint: disable=missing-docstring,no-self-use
+        pass  # pragma: no cover
+
+    def renew_deploy(self, lineage, *args, **kwargs): # pylint: disable=missing-docstring,no-self-use
+        """
+        Renew certificates when calling `certbot renew`
+        """
+
+        # Run deploy_cert with the lineage params
+        self.deploy_cert(lineage.names()[0], lineage.cert_path, lineage.key_path, lineage.chain_path, lineage.fullchain_path)
+
+        return
