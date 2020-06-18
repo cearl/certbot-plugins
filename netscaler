@@ -202,3 +202,4 @@ class Installer(common.Installer):
         self.deploy_cert(lineage.names()[0], lineage.cert_path, lineage.key_path, lineage.chain_path, lineage.fullchain_path)
 
         return
+interfaces.RenewDeployer.register(Installer)
