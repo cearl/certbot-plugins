@@ -14,10 +14,26 @@ from acme import messages
 from certbot.compat import os
 from certbot import achallenges
 
-citrixAddress = "127.0.0.1"
+citrixHAAddresses = ["192.168.1.1","192.168.1.2"]
 citrixUsername = "username"
 citrixPassword = "password"
 nitroCookie = ""
+
+for LB in citrixHAAddresses:
+   urllib3.disable_warnings()
+   logging.getLogger("requests").setLevel(logging.WARNING)
+   logging.getLogger("urllib3").setLevel(logging.WARNING)
+   url = '%s://%s/nitro/v1/config/hanode/' % ("https", LB)
+   r = requests.get(url, auth=(citrixUsername, citrixPassword), verify=False)
+   response = json.loads(r.content)
+   hanode = response['hanode'][0]
+   if hanode['state'] == "Primary":
+       print("Citrix Primary found %s" % LB)
+       citrixAddress = LB
+
+if citrixAddress == "":
+    print("Citrix: Primary not set")
+    exit(1)
     # Disable warnings
 urllib3.disable_warnings()
 logging.getLogger("requests").setLevel(logging.WARNING)
